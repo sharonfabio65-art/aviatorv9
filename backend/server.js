@@ -21,7 +21,7 @@ app.use(helmet({
 
 app.use(cors({
   origin: [
-    'https://your-netlify-app.netlify.app',
+    'https://aviatorpredictor-v9.netlify.app',
     'http://localhost:3000',
     'http://localhost:5500',
     'http://127.0.0.1:5500'
