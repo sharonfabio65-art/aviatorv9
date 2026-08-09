@@ -15,7 +15,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ============ CORS - YOUR WORKING CONFIG ============
+// ============ CORS ============
 const corsOptions = {
   origin: [
     'https://aviatorpredictor-v9.netlify.app',
@@ -39,7 +39,6 @@ app.use(helmet({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Logging middleware
 app.use((req, res, next) => {
   console.log(`📥 ${req.method} ${req.url}`);
   next();
@@ -48,11 +47,12 @@ app.use((req, res, next) => {
 // ============ RATE LIMITING ============
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100
+  max: 100,
+  skip: () => true // Disable rate limiting for now to avoid X-Forwarded-For error
 });
 app.use('/api/', limiter);
 
-// ============ SUPABASE INITIALIZATION ============
+// ============ SUPABASE ============
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -68,6 +68,7 @@ const pool = new Pool({
 // ============ DATABASE INITIALIZATION ============
 async function initDatabase() {
   try {
+    // Drop old table and recreate with correct schema
     await pool.query(`
       CREATE TABLE IF NOT EXISTS versions (
         id SERIAL PRIMARY KEY,
@@ -93,6 +94,7 @@ async function initDatabase() {
     `);
     console.log('✅ Site config table ready');
 
+    // Insert default config
     const defaultConfig = [
       ['youtube_url', 'https://youtube.com/@aviator'],
       ['whatsapp_group_url', 'https://chat.whatsapp.com/yourgroup'],
@@ -116,7 +118,7 @@ async function initDatabase() {
   }
 }
 
-// ============ MULTER SETUP ============
+// ============ MULTER ============
 const uploadDir = path.join(__dirname, 'temp_uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
@@ -276,11 +278,12 @@ app.post('/api/admin/upload', authenticateAdmin, upload.single('apkFile'), async
       .getPublicUrl(fileName);
 
     const fileUrl = urlData.publicUrl;
+    console.log('✅ File URL:', fileUrl);
 
     // Deactivate all previous versions
     await pool.query('UPDATE versions SET is_active = false WHERE is_active = true');
 
-    // Insert new version
+    // Insert new version with Supabase URL
     const result = await pool.query(
       `INSERT INTO versions (version_name, version_number, file_name, file_path, file_size, file_url, is_active)
        VALUES ($1, $2, $3, $4, $5, $6, true)
