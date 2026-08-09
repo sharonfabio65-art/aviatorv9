@@ -36,8 +36,15 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '200mb' }));
+app.use(express.urlencoded({ extended: true, limit: '200mb' }));
+
+// Increase timeout for uploads
+app.use((req, res, next) => {
+  req.setTimeout(120000); // 2 minutes
+  res.setTimeout(120000);
+  next();
+});
 
 app.use((req, res, next) => {
   console.log(`📥 ${req.method} ${req.url}`);
@@ -48,7 +55,7 @@ app.use((req, res, next) => {
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
-  skip: () => true // Disable rate limiting for now to avoid X-Forwarded-For error
+  skip: () => true
 });
 app.use('/api/', limiter);
 
@@ -68,7 +75,6 @@ const pool = new Pool({
 // ============ DATABASE INITIALIZATION ============
 async function initDatabase() {
   try {
-    // Drop old table and recreate with correct schema
     await pool.query(`
       CREATE TABLE IF NOT EXISTS versions (
         id SERIAL PRIMARY KEY,
@@ -94,7 +100,6 @@ async function initDatabase() {
     `);
     console.log('✅ Site config table ready');
 
-    // Insert default config
     const defaultConfig = [
       ['youtube_url', 'https://youtube.com/@aviator'],
       ['whatsapp_group_url', 'https://chat.whatsapp.com/yourgroup'],
@@ -148,7 +153,7 @@ const fileFilter = (req, file, cb) => {
 const upload = multer({ 
   storage: storage,
   fileFilter: fileFilter,
-  limits: { fileSize: 100 * 1024 * 1024 }
+  limits: { fileSize: 200 * 1024 * 1024 } // Increased to 200MB
 });
 
 // ============ AUTHENTICATION ============
@@ -227,7 +232,12 @@ app.get('/api/admin/verify', authenticateAdmin, (req, res) => {
 });
 
 // Upload APK
-app.post('/api/admin/upload', authenticateAdmin, upload.single('apkFile'), async (req, res) => {
+app.post('/api/admin/upload', authenticateAdmin, (req, res, next) => {
+  // Set timeout for this specific route
+  req.setTimeout(180000); // 3 minutes
+  res.setTimeout(180000);
+  next();
+}, upload.single('apkFile'), async (req, res) => {
   try {
     console.log('📤 Upload request received');
     const { versionName, versionNumber } = req.body;
@@ -247,12 +257,15 @@ app.post('/api/admin/upload', authenticateAdmin, upload.single('apkFile'), async
       });
     }
 
-    console.log('📄 File:', file.originalname, file.size);
+    console.log('📄 File:', file.originalname, file.size, 'bytes');
 
-    // Upload to Supabase
+    // Read file
     const fileBuffer = fs.readFileSync(file.path);
     const fileName = `apks/${Date.now()}_${file.originalname}`;
     
+    console.log('📤 Uploading to Supabase...');
+    
+    // Upload to Supabase with progress
     const { data: uploadData, error: uploadError } = await supabase.storage
       .from('apks')
       .upload(fileName, fileBuffer, {
@@ -263,16 +276,22 @@ app.post('/api/admin/upload', authenticateAdmin, upload.single('apkFile'), async
     // Clean up temp file
     try {
       fs.unlinkSync(file.path);
-    } catch (err) {}
+      console.log('🗑️ Temp file deleted');
+    } catch (err) {
+      console.log('⚠️ Could not delete temp file:', err.message);
+    }
 
     if (uploadError) {
-      console.error('Supabase upload error:', uploadError);
+      console.error('❌ Supabase upload error:', uploadError);
       return res.status(500).json({
         success: false,
         message: 'Failed to upload to storage: ' + uploadError.message
       });
     }
 
+    console.log('✅ Uploaded to Supabase');
+
+    // Get public URL
     const { data: urlData } = supabase.storage
       .from('apks')
       .getPublicUrl(fileName);
@@ -283,7 +302,7 @@ app.post('/api/admin/upload', authenticateAdmin, upload.single('apkFile'), async
     // Deactivate all previous versions
     await pool.query('UPDATE versions SET is_active = false WHERE is_active = true');
 
-    // Insert new version with Supabase URL
+    // Insert new version
     const result = await pool.query(
       `INSERT INTO versions (version_name, version_number, file_name, file_path, file_size, file_url, is_active)
        VALUES ($1, $2, $3, $4, $5, $6, true)
@@ -299,7 +318,7 @@ app.post('/api/admin/upload', authenticateAdmin, upload.single('apkFile'), async
       downloadUrl: fileUrl
     });
   } catch (error) {
-    console.error('Upload error:', error);
+    console.error('❌ Upload error:', error);
     res.status(500).json({
       success: false,
       message: 'Upload failed',
