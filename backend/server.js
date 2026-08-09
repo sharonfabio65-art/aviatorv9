@@ -8,59 +8,63 @@ const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
+const { createClient } = require('@supabase/supabase-js');
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// ============ SUPABASE INITIALIZATION ============
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+console.log('✅ Supabase initialized');
+
+// ============ CORS ============
+const corsOptions = {
+  origin: function (origin, callback) {
+    callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
-}));
-
-app.use(cors({
-  origin: [
-    'https://aviatorpredictor-v9.netlify.app',
-    'http://localhost:3000',
-    'http://localhost:5500',
-    'http://127.0.0.1:5500'
-  ],
-  credentials: true
 }));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Rate limiting
+// Logging middleware
+app.use((req, res, next) => {
+  console.log(`📥 ${req.method} ${req.url}`);
+  next();
+});
+
+// ============ RATE LIMITING ============
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 100
 });
 app.use('/api/', limiter);
 
-// Database connection
+// ============ DATABASE ============
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
+  ssl: { rejectUnauthorized: false }
 });
 
-// Test database connection
-pool.connect((err, client, release) => {
-  if (err) {
-    console.error('❌ Error connecting to Neon PostgreSQL:', err.stack);
-  } else {
-    console.log('✅ Connected to Neon PostgreSQL successfully');
-    release();
-  }
-});
-
-// Initialize database tables
+// ============ DATABASE INITIALIZATION ============
 async function initDatabase() {
   try {
-    // Create versions table
+    // Create versions table with Supabase URL
     await pool.query(`
       CREATE TABLE IF NOT EXISTS versions (
         id SERIAL PRIMARY KEY,
@@ -69,13 +73,13 @@ async function initDatabase() {
         file_name VARCHAR(255) NOT NULL,
         file_path VARCHAR(500) NOT NULL,
         file_size INTEGER,
+        file_url TEXT,
         upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         is_active BOOLEAN DEFAULT TRUE
       )
     `);
     console.log('✅ Versions table ready');
 
-    // Create site_config table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS site_config (
         id SERIAL PRIMARY KEY,
@@ -86,7 +90,7 @@ async function initDatabase() {
     `);
     console.log('✅ Site config table ready');
 
-    // Insert default config if not exists
+    // Insert default config
     const defaultConfig = [
       ['youtube_url', 'https://youtube.com/@aviator'],
       ['whatsapp_group_url', 'https://chat.whatsapp.com/yourgroup'],
@@ -104,22 +108,18 @@ async function initDatabase() {
         [key, value]
       );
     }
-    console.log('✅ Default config inserted');
-
     console.log('✅ Database initialization complete');
   } catch (error) {
     console.error('❌ Database initialization error:', error);
   }
 }
 
-// Ensure upload directory exists
-const uploadDir = path.join(__dirname, 'uploadApk');
+// ============ MULTER SETUP (Temporary local storage) ============
+const uploadDir = path.join(__dirname, 'temp_uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
-  console.log('📁 Created upload directory:', uploadDir);
 }
 
-// Multer configuration for file uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     cb(null, uploadDir);
@@ -144,10 +144,10 @@ const fileFilter = (req, file, cb) => {
 const upload = multer({ 
   storage: storage,
   fileFilter: fileFilter,
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
+  limits: { fileSize: 100 * 1024 * 1024 }
 });
 
-// ============ AUTHENTICATION MIDDLEWARE ============
+// ============ AUTHENTICATION ============
 function authenticateAdmin(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
   
@@ -164,12 +164,24 @@ function authenticateAdmin(req, res, next) {
   }
 }
 
+// ============ HEALTH CHECK ============
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    timestamp: new Date().toISOString(),
+    database: 'Neon PostgreSQL',
+    storage: 'Supabase',
+    supabase_url: process.env.SUPABASE_URL
+  });
+});
+
 // ============ API ROUTES ============
 
 // Admin Login
 app.post('/api/admin/login', async (req, res) => {
   try {
     const { email, password } = req.body;
+    console.log('🔐 Login attempt:', email);
 
     if (!email || !password) {
       return res.status(400).json({ 
@@ -178,7 +190,6 @@ app.post('/api/admin/login', async (req, res) => {
       });
     }
 
-    // Check credentials from .env
     if (email === process.env.ADMIN_EMAIL && 
         password === process.env.ADMIN_PASSWORD) {
       
@@ -188,12 +199,14 @@ app.post('/api/admin/login', async (req, res) => {
         { expiresIn: '24h' }
       );
 
+      console.log('✅ Login successful for:', email);
       return res.json({
         success: true,
         token: token,
         message: 'Login successful'
       });
     } else {
+      console.log('❌ Login failed for:', email);
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials'
@@ -213,7 +226,7 @@ app.get('/api/admin/verify', authenticateAdmin, (req, res) => {
   res.json({ success: true, message: 'Token valid' });
 });
 
-// Upload APK (Admin only)
+// Upload APK (Admin only) - with Supabase
 app.post('/api/admin/upload', authenticateAdmin, upload.single('apkFile'), async (req, res) => {
   try {
     const { versionName, versionNumber } = req.body;
@@ -233,24 +246,58 @@ app.post('/api/admin/upload', authenticateAdmin, upload.single('apkFile'), async
       });
     }
 
+    // Upload to Supabase
+    const fileBuffer = fs.readFileSync(file.path);
+    const fileName = `apks/${Date.now()}_${file.originalname}`;
+    
+    console.log('📤 Uploading to Supabase:', fileName);
+    
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from('apks')
+      .upload(fileName, fileBuffer, {
+        contentType: 'application/vnd.android.package-archive',
+        cacheControl: '3600'
+      });
+
+    // Clean up temp file
+    fs.unlinkSync(file.path);
+
+    if (uploadError) {
+      console.error('❌ Supabase upload error:', uploadError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to upload to storage: ' + uploadError.message
+      });
+    }
+
+    // Get public URL
+    const { data: urlData } = supabase.storage
+      .from('apks')
+      .getPublicUrl(fileName);
+
+    const fileUrl = urlData.publicUrl;
+    console.log('✅ File uploaded to Supabase:', fileUrl);
+
     // Deactivate all previous versions
     await pool.query('UPDATE versions SET is_active = false WHERE is_active = true');
 
-    // Insert new version
+    // Insert new version with Supabase URL
     const result = await pool.query(
-      `INSERT INTO versions (version_name, version_number, file_name, file_path, file_size, is_active)
-       VALUES ($1, $2, $3, $4, $5, true)
+      `INSERT INTO versions (version_name, version_number, file_name, file_path, file_size, file_url, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, true)
        RETURNING *`,
-      [versionName, versionNumber, file.filename, file.path, file.size]
+      [versionName, versionNumber, file.originalname, fileName, file.size, fileUrl]
     );
 
+    console.log('✅ APK uploaded successfully:', versionName, versionNumber);
     res.json({
       success: true,
-      message: 'APK uploaded successfully',
-      version: result.rows[0]
+      message: 'APK uploaded successfully to cloud storage',
+      version: result.rows[0],
+      downloadUrl: fileUrl
     });
   } catch (error) {
-    console.error('Upload error:', error);
+    console.error('❌ Upload error:', error);
     res.status(500).json({
       success: false,
       message: 'Upload failed',
@@ -263,7 +310,7 @@ app.post('/api/admin/upload', authenticateAdmin, upload.single('apkFile'), async
 app.get('/api/active-version', async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT version_name, version_number, file_name, file_path, upload_date FROM versions WHERE is_active = true ORDER BY upload_date DESC LIMIT 1'
+      'SELECT version_name, version_number, file_name, file_url, upload_date FROM versions WHERE is_active = true ORDER BY upload_date DESC LIMIT 1'
     );
 
     if (result.rows.length === 0) {
@@ -305,11 +352,11 @@ app.get('/api/admin/versions', authenticateAdmin, async (req, res) => {
   }
 });
 
-// Download latest APK
+// Download latest APK - FROM SUPABASE
 app.get('/api/download', async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT file_path, file_name FROM versions WHERE is_active = true ORDER BY upload_date DESC LIMIT 1'
+      'SELECT file_url, file_name FROM versions WHERE is_active = true ORDER BY upload_date DESC LIMIT 1'
     );
 
     if (result.rows.length === 0) {
@@ -319,17 +366,18 @@ app.get('/api/download', async (req, res) => {
       });
     }
 
-    const { file_path, file_name } = result.rows[0];
+    const { file_url, file_name } = result.rows[0];
     
-    // Check if file exists
-    if (!fs.existsSync(file_path)) {
+    if (!file_url) {
       return res.status(404).json({
         success: false,
-        message: 'APK file not found on server'
+        message: 'No file URL found'
       });
     }
 
-    res.download(file_path, file_name);
+    console.log('📥 Downloading:', file_name);
+    // Redirect to Supabase URL for download
+    return res.redirect(file_url);
   } catch (error) {
     console.error('Download error:', error);
     res.status(500).json({
@@ -339,7 +387,7 @@ app.get('/api/download', async (req, res) => {
   }
 });
 
-// Get public config (social links, quotes)
+// Get public config
 app.get('/api/public-config', async (req, res) => {
   try {
     const result = await pool.query('SELECT config_key, config_value FROM site_config');
@@ -349,7 +397,6 @@ app.get('/api/public-config', async (req, res) => {
       config[row.config_key] = row.config_value;
     });
 
-    // Quotes from database or fallback
     const quotes = [
       { text: "Risk comes from not knowing what you're doing.", author: "Warren Buffett" },
       { text: "The biggest risk is not taking any risk.", author: "Mark Zuckerberg" },
@@ -410,7 +457,7 @@ app.delete('/api/admin/version/:id', authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     
-    // Get file path first
+    // Get file path
     const result = await pool.query('SELECT file_path FROM versions WHERE id = $1', [id]);
     
     if (result.rows.length === 0) {
@@ -420,11 +467,18 @@ app.delete('/api/admin/version/:id', authenticateAdmin, async (req, res) => {
       });
     }
 
-    // Delete file from disk
+    // Delete from Supabase
     const filePath = result.rows[0].file_path;
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-      console.log('🗑️ Deleted file:', filePath);
+    if (filePath) {
+      const { error: deleteError } = await supabase.storage
+        .from('apks')
+        .remove([filePath]);
+      
+      if (deleteError) {
+        console.error('Supabase delete error:', deleteError);
+      } else {
+        console.log('🗑️ Deleted from Supabase:', filePath);
+      }
     }
 
     // Delete from database
@@ -443,16 +497,6 @@ app.delete('/api/admin/version/:id', authenticateAdmin, async (req, res) => {
   }
 });
 
-// ============ HEALTH CHECK ============
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    timestamp: new Date().toISOString(),
-    database: 'Neon PostgreSQL',
-    uploadDir: uploadDir
-  });
-});
-
 // ============ ERROR HANDLING ============
 app.use((err, req, res, next) => {
   console.error('❌ Error:', err.stack);
@@ -466,8 +510,8 @@ app.use((err, req, res, next) => {
 initDatabase().then(() => {
   app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📁 Upload directory: ${uploadDir}`);
-    console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+    console.log(`📦 Supabase storage ready`);
+    console.log(`🔗 Health check: https://aviatorv9backend.onrender.com/health`);
   });
 }).catch(err => {
   console.error('❌ Failed to initialize database:', err);
