@@ -22,21 +22,33 @@ const supabase = createClient(
 );
 console.log('✅ Supabase initialized');
 
-// ============ CORS ============
-const corsOptions = {
+// ============ CORS - FIXED ============
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow all origins for testing
+    callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  exposedHeaders: ['Content-Length', 'X-Requested-With']
+}));
+
+// Handle preflight requests explicitly
+app.options('*', cors({
   origin: function (origin, callback) {
     callback(null, true);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-};
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
+}));
 
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
-
+// ============ MIDDLEWARE ============
 app.use(helmet({
-  crossOriginResourcePolicy: { policy: "cross-origin" }
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  crossOriginOpenerPolicy: false,
+  crossOriginEmbedderPolicy: false
 }));
 
 app.use(express.json());
@@ -45,6 +57,7 @@ app.use(express.urlencoded({ extended: true }));
 // Logging middleware
 app.use((req, res, next) => {
   console.log(`📥 ${req.method} ${req.url}`);
+  console.log('📋 Headers:', req.headers);
   next();
 });
 
@@ -118,6 +131,7 @@ async function initDatabase() {
 const uploadDir = path.join(__dirname, 'temp_uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
+  console.log('📁 Created temp upload directory');
 }
 
 const storage = multer.diskStorage({
@@ -133,6 +147,7 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req, file, cb) => {
+  console.log('📄 File received:', file.originalname, 'MIME:', file.mimetype);
   if (file.mimetype === 'application/vnd.android.package-archive' || 
       file.originalname.endsWith('.apk')) {
     cb(null, true);
@@ -227,12 +242,17 @@ app.get('/api/admin/verify', authenticateAdmin, (req, res) => {
 });
 
 // Upload APK (Admin only) - with Supabase
-app.post('/api/admin/upload', authenticateAdmin, upload.single('apkFile'), async (req, res) => {
+app.post('/api/admin/upload', authenticateAdmin, (req, res, next) => {
+  console.log('📤 Upload request received');
+  next();
+}, upload.single('apkFile'), async (req, res) => {
   try {
+    console.log('📤 Processing upload...');
     const { versionName, versionNumber } = req.body;
     const file = req.file;
 
     if (!file) {
+      console.log('❌ No file in request');
       return res.status(400).json({
         success: false,
         message: 'No file uploaded'
@@ -240,11 +260,18 @@ app.post('/api/admin/upload', authenticateAdmin, upload.single('apkFile'), async
     }
 
     if (!versionName || !versionNumber) {
+      console.log('❌ Missing version info');
       return res.status(400).json({
         success: false,
         message: 'Version name and number are required'
       });
     }
+
+    console.log('📄 File details:', {
+      name: file.originalname,
+      size: file.size,
+      path: file.path
+    });
 
     // Upload to Supabase
     const fileBuffer = fs.readFileSync(file.path);
@@ -260,7 +287,12 @@ app.post('/api/admin/upload', authenticateAdmin, upload.single('apkFile'), async
       });
 
     // Clean up temp file
-    fs.unlinkSync(file.path);
+    try {
+      fs.unlinkSync(file.path);
+      console.log('🗑️ Temp file deleted');
+    } catch (err) {
+      console.log('⚠️ Could not delete temp file:', err.message);
+    }
 
     if (uploadError) {
       console.error('❌ Supabase upload error:', uploadError);
@@ -512,6 +544,7 @@ initDatabase().then(() => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📦 Supabase storage ready`);
     console.log(`🔗 Health check: https://aviatorv9backend.onrender.com/health`);
+    console.log(`✅ CORS enabled for all origins`);
   });
 }).catch(err => {
   console.error('❌ Failed to initialize database:', err);
