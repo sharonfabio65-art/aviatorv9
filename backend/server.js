@@ -36,13 +36,13 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 
-app.use(express.json({ limit: '200mb' }));
-app.use(express.urlencoded({ extended: true, limit: '200mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Increase timeout for uploads
 app.use((req, res, next) => {
-  req.setTimeout(120000); // 2 minutes
-  res.setTimeout(120000);
+  req.setTimeout(180000); // 3 minutes
+  res.setTimeout(180000);
   next();
 });
 
@@ -123,7 +123,7 @@ async function initDatabase() {
   }
 }
 
-// ============ MULTER ============
+// ============ MULTER - USE STREAMING ============
 const uploadDir = path.join(__dirname, 'temp_uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
@@ -153,7 +153,7 @@ const fileFilter = (req, file, cb) => {
 const upload = multer({ 
   storage: storage,
   fileFilter: fileFilter,
-  limits: { fileSize: 200 * 1024 * 1024 } // Increased to 200MB
+  limits: { fileSize: 200 * 1024 * 1024 }
 });
 
 // ============ AUTHENTICATION ============
@@ -231,11 +231,10 @@ app.get('/api/admin/verify', authenticateAdmin, (req, res) => {
   res.json({ success: true, message: 'Token valid' });
 });
 
-// Upload APK
+// Upload APK - STREAMING VERSION (low memory)
 app.post('/api/admin/upload', authenticateAdmin, (req, res, next) => {
-  // Set timeout for this specific route
-  req.setTimeout(180000); // 3 minutes
-  res.setTimeout(180000);
+  req.setTimeout(300000); // 5 minutes
+  res.setTimeout(300000);
   next();
 }, upload.single('apkFile'), async (req, res) => {
   try {
@@ -259,18 +258,20 @@ app.post('/api/admin/upload', authenticateAdmin, (req, res, next) => {
 
     console.log('📄 File:', file.originalname, file.size, 'bytes');
 
-    // Read file
-    const fileBuffer = fs.readFileSync(file.path);
+    // ============ STREAM THE FILE TO SUPABASE ============
     const fileName = `apks/${Date.now()}_${file.originalname}`;
     
-    console.log('📤 Uploading to Supabase...');
+    console.log('📤 Streaming to Supabase...');
     
-    // Upload to Supabase with progress
+    // Use streaming upload - reads file in chunks
+    const fileStream = fs.createReadStream(file.path);
+    
     const { data: uploadData, error: uploadError } = await supabase.storage
       .from('apks')
-      .upload(fileName, fileBuffer, {
+      .upload(fileName, fileStream, {
         contentType: 'application/vnd.android.package-archive',
-        cacheControl: '3600'
+        cacheControl: '3600',
+        duplex: 'half' // Required for Node.js streams
       });
 
     // Clean up temp file
@@ -319,6 +320,12 @@ app.post('/api/admin/upload', authenticateAdmin, (req, res, next) => {
     });
   } catch (error) {
     console.error('❌ Upload error:', error);
+    // Clean up temp file if exists
+    if (req.file && req.file.path) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (err) {}
+    }
     res.status(500).json({
       success: false,
       message: 'Upload failed',
@@ -519,6 +526,7 @@ initDatabase().then(() => {
   app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`✅ CORS enabled for: https://aviatorpredictor-v9.netlify.app`);
+    console.log(`✅ Using streaming upload (low memory)`);
   });
 }).catch(err => {
   console.error('❌ Failed to initialize database:', err);
